@@ -1,0 +1,62 @@
+pipeline {
+    agent any
+
+    environment {
+        APP_NAME = "{{APP_NAME}}"
+        NAMESPACE = "{{APP_NAMESPACE}}"  // 프로필별 세팅 네임
+        // Docker 이미지 이름 (빌드 번호를 태그로 포함)
+        DOCKER_IMAGE = "dockerhub.com/${APP_NAME}:${BUILD_NUMBER}"
+        APP_IMAGE = "${DOCKER_IMAGE}"
+        // Jenkins에 등록된 KUBECONFIG 파일의 Credentials ID (쿠버네티스 클러스터 접근용)
+        KUBECONFIG_CREDENTIALS_ID = "kubeconfig-credentials"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'master', url: '{{YOUR_GIT_REPOSITORY_URL}}'
+            }
+        }
+        stage('Build') {
+            steps {
+                sh './gradlew clean build'
+            }
+        }
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    // Docker 이미지 빌드 및 태그 적용
+                    sh "docker build -t ${DOCKER_IMAGE} ."
+                    // Docker 레지스트리로 이미지 푸시
+                    sh "docker push ${DOCKER_IMAGE}"
+                }
+            }
+        }
+        stage('Deploy Namespace') {
+            steps {
+                sh './deploy_namespace.sh'
+            }
+        }
+        stage('Deploy to Kubernetes') {
+            steps {
+                // Jenkins Credentials에 등록된 KUBECONFIG 파일을 사용하여 쿠버네티스 클러스터에 접근
+                withCredentials([file(credentialsId: "${KUBECONFIG_CREDENTIALS_ID}", variable: 'KUBECONFIG')]) {
+                    // k8s 폴더 내의 모든 YAML 파일을 적용
+                    sh 'kubectl apply -R -f k8s/'
+                    // Deployment의 컨테이너 이미지를 최신 Docker 이미지로 업데이트
+                    sh "kubectl set image deployment/${APP_NAME}-deployment ${APP_NAME}-container=${DOCKER_IMAGE} -n ${NAMESPACE}"
+                    sh "kubectl rollout status deployment/${APP_NAME}-deployment -n ${NAMESPACE}"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "배포가 성공적으로 완료되었습니다."
+        }
+        failure {
+            echo "배포 과정 중 오류가 발생하였습니다."
+        }
+    }
+}
